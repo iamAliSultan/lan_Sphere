@@ -3,7 +3,8 @@
 import 'package:flutter/material.dart';
 import 'screens/splash_screen.dart'; // Import the splash screen
 
-void main() {
+void main() async {
+ 
   runApp(LANsphereApp());
 }
 
