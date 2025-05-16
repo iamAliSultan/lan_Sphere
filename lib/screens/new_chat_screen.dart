@@ -1,27 +1,40 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:uuid/uuid.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:network_info_plus/network_info_plus.dart';
-import '../color.dart';
 import 'package:image_picker/image_picker.dart';
-import './chat_screen.dart';
+import 'package:path_provider/path_provider.dart';
+import '../color.dart';
+import 'chat_screen.dart';
+import 'login_signup_screen.dart';
 
 class LanContact {
   final String name;
   final String ip;
   final String id;
+  final String? profilePic;
+  String? lastMessage;
 
-  LanContact({required this.name, required this.ip, required this.id});
+  LanContact({required this.name, required this.ip, required this.id, this.profilePic, this.lastMessage});
 
-  Map<String, dynamic> toMap() => {'name': name, 'ip': ip, 'id': id};
+  Map<String, dynamic> toMap() => {
+        'name': name,
+        'ip': ip,
+        'id': id,
+        'profilePic': profilePic,
+        'lastMessage': lastMessage,
+      };
 
   factory LanContact.fromMap(Map<String, dynamic> map) => LanContact(
         name: map['name'],
         ip: map['ip'],
         id: map['id'],
+        profilePic: map['profilePic'],
+        lastMessage: map['lastMessage'],
       );
 }
 
@@ -69,13 +82,15 @@ class _NewChatScreenState extends State<NewChatScreen> {
     final contactListJson = prefs.getStringList('contacts') ?? [];
     contactListJson.add(json.encode(contact.toMap()));
     await prefs.setStringList('contacts', contactListJson);
+    // Establish TCP connection and set contact name
+    final client = await ChatManager().getTcpClient(contact.ip);
+    if (client != null) ChatManager().setContactName(contact.ip, contact.name);
     _loadContacts();
   }
 
   Future<void> _saveAllContacts() async {
     final prefs = await SharedPreferences.getInstance();
-    final contactListJson =
-        contacts.map((contact) => json.encode(contact.toMap())).toList();
+    final contactListJson = contacts.map((contact) => json.encode(contact.toMap())).toList();
     await prefs.setStringList('contacts', contactListJson);
   }
 
@@ -87,6 +102,19 @@ class _NewChatScreenState extends State<NewChatScreen> {
         parts1[0] == parts2[0] &&
         parts1[1] == parts2[1] &&
         parts1[2] == parts2[2];
+  }
+
+  Future<String?> _copyImageToAppDir(String? imagePath) async {
+    if (imagePath == null) return null;
+    final directory = await getApplicationDocumentsDirectory();
+    final profilePicsDir = Directory('${directory.path}/profile_pics');
+    if (!await profilePicsDir.exists()) {
+      await profilePicsDir.create();
+    }
+    final fileName = 'profile_${DateTime.now().millisecondsSinceEpoch}.jpg';
+    final newPath = '${profilePicsDir.path}/$fileName';
+    await File(imagePath).copy(newPath);
+    return newPath;
   }
 
   void _scanQRCode() {
@@ -119,47 +147,42 @@ class _NewChatScreenState extends State<NewChatScreen> {
                 return;
               }
 
-              final name = await showDialog<String>(
+              final contactData = await showDialog<ContactData>(
                 context: context,
-                builder: (context) {
-                  String deviceName = "";
-                  return AlertDialog(
-                    title: const Text("Enter Device Name"),
-                    content: TextField(
-                      onChanged: (value) => deviceName = value,
-                      decoration: const InputDecoration(hintText: "Device Name"),
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(context, null),
-                        child: const Text("Cancel"),
-                      ),
-                      TextButton(
-                        onPressed: () => Navigator.pop(context, deviceName),
-                        child: const Text("Save"),
-                      ),
-                    ],
-                  );
-                },
+                builder: (context) => ContactEditorDialog(initialName: ''),
               );
 
-              if (name == null || name.isEmpty) {
-                Navigator.pop(context);
+              if (contactData == null || contactData.name.isEmpty) {
+                Navigator.pop(context); // Close QRScannerScreen if Cancel is pressed or no name is provided
                 return;
               }
 
-              final contact = LanContact(name: name, ip: scannedIp, id: id);
+              final profilePicPath = await _copyImageToAppDir(contactData.profilePicPath);
+              final contact = LanContact(
+                name: contactData.name,
+                ip: scannedIp,
+                id: id,
+                profilePic: profilePicPath,
+              );
               await _saveContact(contact);
 
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text("Saved Contact: ${contact.name}")),
               );
-              Navigator.pop(context);
+
+              // Navigate directly to ChatScreen after saving the new contact
+              Navigator.pop(context); // Close QRScannerScreen
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => ChatScreen(contact: contact),
+                ),
+              );
             } catch (_) {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text("Invalid QR Code Format")),
               );
-              Navigator.pop(context);
+              Navigator.pop(context); // Close QRScannerScreen on error
             }
           },
         ),
@@ -215,49 +238,51 @@ class _NewChatScreenState extends State<NewChatScreen> {
                 final contact = contacts[index];
                 return ListTile(
                   title: Text(contact.name, style: TextStyle(color: AppColor.text)),
-                  subtitle: Text("IP: ${contact.ip}", style: TextStyle(color: Colors.grey)),
-                  leading: const Icon(Icons.person, color: Color(0xFF1E2C2F)),
-                  onTap: () {
-                    Navigator.push(
+                  leading: CircleAvatar(
+                    backgroundImage: contact.profilePic != null && File(contact.profilePic!).existsSync()
+                        ? FileImage(File(contact.profilePic!))
+                        : null,
+                    child: contact.profilePic == null || !File(contact.profilePic!).existsSync()
+                        ? const Icon(Icons.person, color: Color(0xFF1E2C2F))
+                        : null,
+                  ),
+                  onTap: () async {
+                    final updatedContact = await Navigator.push(
                       context,
                       MaterialPageRoute(
                         builder: (context) => ChatScreen(contact: contact),
                       ),
                     );
+                    if (updatedContact != null) {
+                      setState(() {
+                        contacts[index] = updatedContact;
+                      });
+                      await _saveAllContacts();
+                    }
                   },
                   trailing: PopupMenuButton<String>(
+                    color: Colors.black.withOpacity(0.6),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: BorderSide(color: Colors.white.withOpacity(0.2)),
+                    ),
                     onSelected: (value) async {
                       if (value == 'edit') {
-                        final newName = await showDialog<String>(
+                        final contactData = await showDialog<ContactData>(
                           context: context,
-                          builder: (context) {
-                            String name = contact.name;
-                            return AlertDialog(
-                              title: const Text("Edit Contact Name"),
-                              content: TextField(
-                                controller: TextEditingController(text: name),
-                                onChanged: (value) => name = value,
-                                decoration: const InputDecoration(hintText: "Contact Name"),
-                              ),
-                              actions: [
-                                TextButton(
-                                  onPressed: () => Navigator.pop(context, null),
-                                  child: const Text("Cancel"),
-                                ),
-                                TextButton(
-                                  onPressed: () => Navigator.pop(context, name),
-                                  child: const Text("Save"),
-                                ),
-                              ],
-                            );
-                          },
+                          builder: (context) => ContactEditorDialog(
+                            initialName: contact.name,
+                            initialProfilePic: contact.profilePic,
+                          ),
                         );
-                        if (newName != null && newName.isNotEmpty) {
+                        if (contactData != null && contactData.name.isNotEmpty) {
+                          final profilePicPath = await _copyImageToAppDir(contactData.profilePicPath);
                           setState(() {
                             contacts[index] = LanContact(
-                              name: newName,
+                              name: contactData.name,
                               ip: contact.ip,
                               id: contact.id,
+                              profilePic: profilePicPath,
                             );
                           });
                           await _saveAllContacts();
@@ -270,8 +295,8 @@ class _NewChatScreenState extends State<NewChatScreen> {
                       }
                     },
                     itemBuilder: (context) => [
-                      const PopupMenuItem(value: 'edit', child: Text("Edit")),
-                      const PopupMenuItem(value: 'delete', child: Text("Delete")),
+                      const PopupMenuItem(value: 'edit', child: Text("Edit", style: TextStyle(color: Colors.white))),
+                      const PopupMenuItem(value: 'delete', child: Text("Delete", style: TextStyle(color: Colors.white))),
                     ],
                   ),
                 );
@@ -279,6 +304,202 @@ class _NewChatScreenState extends State<NewChatScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class ContactData {
+  final String name;
+  final String? profilePicPath;
+
+  ContactData({required this.name, this.profilePicPath});
+}
+
+class ContactEditorDialog extends StatefulWidget {
+  final String initialName;
+  final String? initialProfilePic;
+
+  const ContactEditorDialog({
+    required this.initialName,
+    this.initialProfilePic,
+  });
+
+  @override
+  _ContactEditorDialogState createState() => _ContactEditorDialogState();
+}
+
+class _ContactEditorDialogState extends State<ContactEditorDialog> {
+  final TextEditingController _nameController = TextEditingController();
+  final ImagePicker _picker = ImagePicker();
+  File? _selectedImage;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController.text = widget.initialName;
+    if (widget.initialProfilePic != null) {
+      _selectedImage = File(widget.initialProfilePic!);
+    }
+  }
+
+  Future<void> _pickImage() async {
+    try {
+      print('Attempting to pick image...');
+      final XFile? image = await _picker.pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 50,
+      );
+      print('Image picked: ${image?.path}');
+
+      if (image != null) {
+        final file = File(image.path);
+        if (await file.exists()) {
+          print('File exists at path: ${image.path}');
+          setState(() {
+            _selectedImage = file;
+          });
+        } else {
+          print('File does not exist at path: ${image.path}');
+        }
+      } else {
+        print('No image selected');
+      }
+    } catch (e, stackTrace) {
+      print('Error picking image: $e');
+      print('Stack trace: $stackTrace');
+    }
+  }
+
+  void _removeImage() {
+    setState(() {
+      _selectedImage = null;
+    });
+    print('Image removed');
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [AppColor.appbar, AppColor.headertext, AppColor.button],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8.0),
+              child: const Text(
+                'Edit Contact',
+                style: TextStyle(color: Colors.white, fontSize: 18),
+              ),
+            ),
+            Flexible(
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Flexible(
+                            child: CircleAvatar(
+                              radius: 30,
+                              backgroundImage: _selectedImage != null
+                                  ? FileImage(_selectedImage!)
+                                  : null,
+                              child: _selectedImage == null
+                                  ? const Icon(Icons.person, size: 30, color: Colors.white)
+                                  : null,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          IconButton(
+                            icon: const Icon(Icons.camera_alt, color: AppColor.button, size: 24),
+                            onPressed: _pickImage,
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.delete, color: Colors.red, size: 24),
+                            onPressed: _removeImage,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      SizedBox(
+                        width: 200,
+                        child: TextField(
+                          controller: _nameController,
+                          decoration: InputDecoration(
+                            labelText: 'Name',
+                            labelStyle: const TextStyle(color: Colors.white),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(10),
+                              borderSide: const BorderSide(color: Colors.white),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(10),
+                              borderSide: const BorderSide(color: Colors.white),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(10),
+                              borderSide: const BorderSide(color: Colors.white),
+                            ),
+                          ),
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: () {
+                      Navigator.pop(context); // Simply close the dialog on Cancel
+                    },
+                    child: const Text('Cancel', style: TextStyle(color: Colors.white)),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      final name = _nameController.text.trim();
+                      if (name.isNotEmpty) {
+                        Navigator.pop(
+                          context,
+                          ContactData(
+                            name: name,
+                            profilePicPath: _selectedImage?.path,
+                          ),
+                        );
+                      }
+                    },
+                    child: const Text('Save', style: TextStyle(color: Colors.white)),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -310,15 +531,27 @@ class QRScannerScreen extends StatelessWidget {
           IconButton(
             icon: const Icon(Icons.image),
             onPressed: () async {
-              final image = await ImagePicker().pickImage(source: ImageSource.gallery);
+              final picker = ImagePicker();
+              final image = await picker.pickImage(source: ImageSource.gallery);
               if (image != null) {
                 final result = await controller.analyzeImage(image.path);
-                if (result?.raw != null) {
-                  onScan(result!.raw! as String);
+                if (result?.barcodes.isNotEmpty == true) {
+                  final rawValue = result!.barcodes.first.rawValue;
+                  if (rawValue != null) {
+                    onScan(rawValue);
+                  } else {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text("No QR code found in the image")),
+                    );
+                  }
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("No QR code detected in the image")),
+                  );
                 }
               }
             },
-          )
+          ),
         ],
       ),
       body: Center(
@@ -328,12 +561,13 @@ class QRScannerScreen extends StatelessWidget {
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
             border: Border.all(color: const Color.fromARGB(255, 3, 70, 47), width: 2),
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(12),
           ),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(12),
             child: MobileScanner(
               fit: BoxFit.cover,
+              controller: controller,
               onDetect: (capture) {
                 for (final barcode in capture.barcodes) {
                   if (barcode.rawValue != null) {

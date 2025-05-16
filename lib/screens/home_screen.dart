@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'login_signup_screen.dart'; // Import LoginSignupScreen
+import 'main_home_screen.dart'; // Import LoginSignupScreen
 import '../color.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -127,7 +127,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                             // Navigate to Login Screen
                             Navigator.pushReplacement(
                               context,
-                              MaterialPageRoute(builder: (context) => const LoginSignupScreen()),
+                              MaterialPageRoute(builder: (context) =>    MainHomeScreen()),
                             );
                           },
                         ),
